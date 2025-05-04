@@ -1,0 +1,19 @@
+{
+  "books": [
+    {
+      "title": "Linear Algebra and Its Applications",
+      "authors": ["David C. Lay", "Steven R. Lay", "Judi J. McDonald"],
+      "favoriteAttributes": ["Simple Explanations", "Transition to Advanced Topics"]
+    },
+    {
+      "title": "Calculus Illustrated. Volume 2: Differential Calculus",
+      "authors": ["Peter Saveliev"],
+      "favoriteAttributes": ["Visuals", "Format of Questions", "Great Background Information on Each Topic"]
+    },
+    {
+      "title": "Statistics: Principles and Methods",
+      "authors": ["Richard A. Johnson", "Gouri K. Bhattacharyya"],
+      "favoriteAttributes": ["Practical", "Basics Coverage"]
+    }
+  ]
+}

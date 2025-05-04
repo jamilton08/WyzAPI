@@ -1,0 +1,71 @@
+{
+  "name": "argon-design-system-pro-react",
+  "version": "1.0.2",
+  "private": true,
+  "dependencies": {
+    "@fortawesome/fontawesome-free": "6.4.0",
+    "@glidejs/glide": "3.6.0",
+    "@testing-library/jest-dom": "5.16.5",
+    "@testing-library/react": "14.0.0",
+    "@testing-library/user-event": "14.4.3",
+    "axios": "^1.7.2",
+    "choices.js": "10.2.0",
+    "headroom.js": "0.12.0",
+    "moment": "2.29.4",
+    "nouislider": "15.4.0",
+    "prop-types": "15.8.1",
+    "react": ">=16.0.0",
+    "react-datetime": "3.2.0",
+    "react-dom": ">=16.0.0",
+    "react-github-button": "0.1.11",
+    "react-google-maps": "9.4.5",
+    "react-router-dom": "6.11.1",
+    "react-scripts": "5.0.1",
+    "reactstrap": "8.10.0",
+    "sass": "1.62.1"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject",
+    "install:clean": "rm -rf node_modules/ && rm -rf package-lock.json && npm install && npm start",
+    "compile-sass": "sass src/assets/scss/argon-design-system.scss src/assets/css/argon-design-system.css",
+    "minify-sass": "sass src/assets/scss/argon-design-system.scss src/assets/css/argon-design-system.min.css --style compressed"
+  },
+  "eslintConfig": {
+    "extends": "react-app"
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  },
+  "peerDependencies": {
+    "react": ">=16.0.0",
+    "react-dom": ">=16.0.0"
+  },
+  "optionalDependencies": {
+    "@types/googlemaps": "3.39.11",
+    "@types/markerclustererplus": "2.1.33",
+    "typescript": "5.0.4"
+  },
+  "overrides": {
+    "svgo": "3.0.2"
+  },
+  "devDependencies": {
+    "ajv": "^8.16.0",
+    "html-webpack-plugin": "^5.6.0",
+    "webpack": "^5.93.0",
+    "webpack-cli": "^5.1.4",
+    "webpack-dev-middleware": "^7.2.1",
+    "webpack-dev-server": "^5.0.4"
+  }
+}
