@@ -11,14 +11,9 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 """
 
 from pathlib import Path
-from datetime import timedelta
 from decouple import config, Csv
-import logging
-from dotenv import load_dotenv
-from urllib.parse import urlparse
-import os
-
-load_dotenv()
+import dj_database_url
+from datetime import timedelta
 
 
 
@@ -31,11 +26,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = config('SECRET_KEY')
-
-
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = config('DEBUG', default=False, cast=bool)
-
+DEBUG      = config('DEBUG', default=False, cast=bool)
 ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='*', cast=Csv())
 
 
@@ -145,21 +136,15 @@ ASGI_APPLICATION = 'wyzcon.asgi.application'
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
 
 
-# Replace the DATABASES section of your settings.py with this
-db_url = urlparse(os.environ['DATABASE_URL'])
+CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOWED_ORIGINS = config('CORS_ALLOWED_ORIGINS', cast=Csv(), default='')
 
+# Database (via URL)
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.contrib.gis.db.backends.postgis',
-        'NAME': db_url.path.lstrip('/'),           # e.g. "Wyzcon"
-        'USER': db_url.username,
-        'PASSWORD': db_url.password,
-        'HOST': db_url.hostname,                   # writer endpoint
-        'PORT': db_url.port or 5432,
-        'OPTIONS': {
-            'sslmode': 'require',
-        },
-    }
+  'default': dj_database_url.parse(
+      config('DATABASE_URL'),
+      engine='django.contrib.gis.db.backends.postgis'
+  )
 }
 
 # Password validation
