@@ -22,10 +22,16 @@ class TokenAuthMiddleWare:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        query_string = scope["query_string"]
-        query_params = query_string.decode()
-        query_dict = parse_qs(query_params)
-        token = query_dict["token"][0]
-        user = await returnUser(token)
-        scope["user"] = user
+        # decode & parse query string (may be empty)
+        raw_qs = scope.get("query_string", b"")
+        qs = parse_qs(raw_qs.decode())
+
+        # only if there's a token parameter, do your lookup
+        token_list = qs.get("token")
+        if token_list:
+            token = token_list[0]
+            user = await returnUser(token)
+            scope["user"] = user
+
+        # always continue to the next app in the stack
         return await self.app(scope, receive, send)
