@@ -7,13 +7,11 @@ class VideoUpload(models.Model):
         unique=True,
         blank=True  # Auto-filled on save.
     )
-    user_type = models.CharField(
-        max_length=1,
-        choices=(
-            ('M', 'Manager'),
-            ('N', 'User')
-        ),
-        default='M'
+    shareable_link = models.CharField(
+        max_length=255,
+        unique=True,
+        blank=True,
+        help_text="A second UUID used for sharing with others."
     )
     file_path = models.CharField(max_length=255)  # e.g. S3 URL or key.
     url = models.URLField(
@@ -28,15 +26,21 @@ class VideoUpload(models.Model):
     )
     upload_date = models.DateTimeField(auto_now_add=True)
 
-    steps = models.ManyToManyField('Step', related_name='video_uploads', blank=True)
+    steps = models.ManyToManyField(
+        'Step',
+        related_name='video_uploads',
+        blank=True
+    )
 
     def save(self, *args, **kwargs):
         if not self.unique_link:
             self.unique_link = str(uuid.uuid4())
+        if not self.shareable_link:
+            self.shareable_link = str(uuid.uuid4())
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.unique_link} ({self.user_type})"
+        return f"{self.unique_link} (Shareable: {self.shareable_link})"
 
 
 class Step(models.Model):

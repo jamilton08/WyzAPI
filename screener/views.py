@@ -13,6 +13,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET
 from .models import VideoUpload, Step
 import logging
+from django.forms.models import model_to_dict
 
 
 
@@ -36,8 +37,6 @@ def upload_video(request):
         if not video_file:
             return JsonResponse({'error': 'No video file provided'}, status=400)
         
-        # Use the provided type or default to "M"
-        user_type = request.POST.get('type', 'M')
 
         # Get the source URL from the request (if provided).
         source_url = request.POST.get('url', '').strip()
@@ -79,7 +78,6 @@ def upload_video(request):
             
             # Create and save the VideoUpload model record, including the source URL and login_required flag.
             video_upload = VideoUpload.objects.create(
-                user_type=user_type,  # Defaults to "M" if not provided.
                 file_path=video_url,
                 url=source_url,
                 login_required=login_required_value
@@ -288,38 +286,67 @@ def trim_single_step(request, unique_link):
 
 
 @require_GET
-def get_steps(request, unique_link):
+def get_steps(request, link):
     """
-    Return a JSON response with details of the VideoUpload and all its associated steps.
-    Each step contains details such as title, description, start and end times, thumbnails, 
-    events, order, and the trimmed video URL. The response also includes the website URL 
-    stored in the VideoUpload instance.
+    GET /screener/get_steps/<link>/
+    - If link matches VideoUpload.unique_link → access_type 'm'
+      include full model under 'video_upload'.
+    - Else if link matches VideoUpload.shareable_link → access_type 'u'
+      return only video_upload_url + steps.
+    - Otherwise 404.
     """
+    # 1) Lookup by unique_link first (manager access)
     try:
-        video_upload = VideoUpload.objects.get(unique_link=unique_link)
+        video_upload = VideoUpload.objects.get(unique_link=link)
+        access_type  = 'm'
     except VideoUpload.DoesNotExist:
-        return JsonResponse({'error': 'VideoUpload not found'}, status=404)
+        # 2) Fallback to shareable_link (user access)
+        try:
+            video_upload = VideoUpload.objects.get(shareable_link=link)
+            access_type  = 'u'
+        except VideoUpload.DoesNotExist:
+            return JsonResponse({'error': 'VideoUpload not found'}, status=404)
 
-    # Retrieve all related steps and order them.
-    steps_qs = video_upload.steps.all().order_by('order')
-    steps_list = []
-    for step in steps_qs:
-        steps_list.append({
-            'id': step.id,
-            'title': step.title,
-            'description': step.description,
-            'start_time': step.start_time,
-            'end_time': step.end_time,
-            'thumb_start': step.thumb_start,
-            'thumb_end': step.thumb_end,
-            'events': step.events,    # JSONField; assumed serializable.
-            'order': step.order,
-            'trimmed_video': step.trimmed_video,
-        })
+    # 3) Build steps payload
+    steps_list = [
+        {
+            'id':            s.id,
+            'title':         s.title,
+            'description':   s.description,
+            'start_time':    s.start_time,
+            'end_time':      s.end_time,
+            'thumb_start':   s.thumb_start,
+            'thumb_end':     s.thumb_end,
+            'events':        s.events,
+            'order':         s.order,
+            'trimmed_video': s.trimmed_video,
+        }
+        for s in video_upload.steps.all().order_by('order')
+    ]
 
-    # Include the website link (VideoUpload.url) along with the steps.
+    # 4) Base response
     response_data = {
-        'video_upload_url': video_upload.url,
-        'steps': steps_list
+        'access_type':       access_type,
+        'video_upload_url':  video_upload.url,
+        'steps':             steps_list,
     }
+
+    # 5) If manager access, include full model
+    if access_type == 'm':
+        response_data['video_upload'] = model_to_dict(
+            video_upload,
+            fields=[ 
+                'id',
+                'url',
+                'unique_link',
+                'shareable_link',
+                'upload_date',
+                # any other fields you want
+            ]
+        )
+
     return JsonResponse(response_data)
+
+
+
+
