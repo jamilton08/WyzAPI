@@ -41,3 +41,6 @@ def add_to_service(request, *args, **kwargs):
             serializer.add()
             return Response(status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+
+

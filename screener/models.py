@@ -32,6 +32,8 @@ class VideoUpload(models.Model):
         blank=True
     )
 
+    recordings = models.JSONField(default=list, blank=True)
+
     def save(self, *args, **kwargs):
         if not self.unique_link:
             self.unique_link = str(uuid.uuid4())

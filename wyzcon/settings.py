@@ -140,12 +140,16 @@ CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOWED_ORIGINS = config('CORS_ALLOWED_ORIGINS', cast=Csv(), default='')
 
 # Database (via URL)
+
 DATABASES = {
   'default': dj_database_url.parse(
-      config('DATABASE_URL'),
-      engine='django.contrib.gis.db.backends.postgis'
+     config('DATABASE_URL'),
+     engine='django.contrib.gis.db.backends.postgis'
   )
 }
+
+
+
 
 # Password validation
 # https://docs.djangoproject.com/en/4.2/ref/settings/#auth-password-validators
@@ -202,8 +206,11 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # Email settings
 EMAIL_BACKEND = 'sendgrid_backend.SendgridBackend'
 SENDGRID_API_KEY = config('SENDGRID_API_KEY')
+SENDGRID_FROM_EMAIL   = config('DEFAULT_FROM_EMAIL')
+SENDGRID_TEMPLATE_ID  = config('EMAIL_SHARE_LINK_TEMPLATE_ID')
 SENDGRID_SANDBOX_MODE_IN_DEBUG = False
 SENDGRID_ECHO_TO_STDOUT = True
+FRONTEND_URL = config('FRONTEND_URL')
 
 #needed for organization
 ORGS_SLUGFIELD = 'autoslug.fields.AutoSlugField'

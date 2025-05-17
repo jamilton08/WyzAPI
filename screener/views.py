@@ -14,6 +14,10 @@ from django.views.decorators.http import require_GET
 from .models import VideoUpload, Step
 import logging
 from django.forms.models import model_to_dict
+from sendgrid  import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
+from django.views.decorators.http import require_http_methods
+
 
 
 
@@ -41,6 +45,12 @@ def upload_video(request):
         # Get the source URL from the request (if provided).
         source_url = request.POST.get('url', '').strip()
         login_required_value = False
+
+        recordings_json = request.POST.get('recordings', '[]')
+        try:
+            recordings_list = json.loads(recordings_json)
+        except json.JSONDecodeError:
+            return JsonResponse({'error': 'Invalid recordings JSON'}, status=400)
 
         # If a source URL is provided, use the require_login utility to check it.
         if source_url:
@@ -80,12 +90,13 @@ def upload_video(request):
             video_upload = VideoUpload.objects.create(
                 file_path=video_url,
                 url=source_url,
-                login_required=login_required_value
+                login_required=login_required_value,
+                recordings   = recordings_list,
             )
             video_upload.save()
             
             logger.info(f"Video uploaded successfully: {video_url}")
-            return JsonResponse({'unique_link': video_upload.unique_link, 'video_url': video_url})
+            return JsonResponse({'unique_link': video_upload.unique_link, 'video_url': video_url, 'shareable_link': video_upload.shareable_link}, status=201)
         
         except Exception as e:
             logger.error(f"Error uploading video: {e}", exc_info=True)
@@ -261,6 +272,11 @@ def trim_single_step(request, unique_link):
         # Associate the step with the VideoUpload.
         video_upload.steps.add(step_instance)
 
+        incoming_recs = step_data.get('recordings')
+        if isinstance(incoming_recs, list):
+            video_upload.recordings = incoming_recs
+            video_upload.save(update_fields=['recordings'])
+
         # Clean up temporary files.
         if os.path.exists(local_trimmed_path):
             os.remove(local_trimmed_path)
@@ -329,6 +345,7 @@ def get_steps(request, link):
         'access_type':       access_type,
         'video_upload_url':  video_upload.url,
         'steps':             steps_list,
+        'recordings':       video_upload.recordings
     }
 
     # 5) If manager access, include full model
@@ -347,6 +364,91 @@ def get_steps(request, link):
 
     return JsonResponse(response_data)
 
+
+
+
+
+@csrf_exempt
+@require_http_methods(["DELETE"])
+def delete_step(request, unique_link, step_id):
+    """
+    DELETE /screener/step/<unique_link>/<step_id>/
+    Body (JSON): { "recordings": [ ... ] }
+    """
+    # 1) Lookup your VideoUpload by unique_link
+    try:
+        video_upload = VideoUpload.objects.get(unique_link=unique_link)
+    except VideoUpload.DoesNotExist:
+        return JsonResponse({'error': 'VideoUpload not found.'}, status=404)
+
+    # 2) Parse the incoming JSON
+    try:
+        payload    = json.loads(request.body)
+        recs       = payload.get('recordings', [])
+    except ValueError:
+        return JsonResponse({'error': 'Invalid JSON.'}, status=400)
+
+    # 3) Delete the Step
+    try:
+        step = Step.objects.get(pk=step_id)
+        step.delete()
+    except Step.DoesNotExist:
+        # we’ll still update recordings even if the step was already gone
+        pass
+
+    # 4) Persist the updated recordings array
+    video_upload.recordings = recs
+    video_upload.save(update_fields=['recordings'])
+
+    return JsonResponse({'message': 'Step deleted and recordings updated.'})
+
+
+
+
+@csrf_exempt
+def email_share(request):
+    """
+    POST /screener/email-share/
+
+    Expects JSON: { email, unique_link, shareable_link }
+    Sends an email via SendGrid dynamic template.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Invalid request method'}, status=405)
+
+    try:
+        data  = json.loads(request.body)
+        email = data['email']
+        ulink = data['unique_link']
+        slink = data['shareable_link']
+    except (ValueError, KeyError):
+        return JsonResponse({'error': 'email, unique_link and shareable_link are required.'}, status=400)
+
+    # Build the SendGrid Mail object
+    message = Mail(
+        from_email = settings.SENDGRID_FROM_EMAIL,
+        to_emails  = email,
+    )
+    message.template_id = settings.SENDGRID_TEMPLATE_ID
+    # Pass dynamic template data for your template placeholders
+    message.dynamic_template_data = {
+        'manage_link': f"{settings.FRONTEND_URL}/manage/{ulink}",
+        'share_link':  f"{settings.FRONTEND_URL}/share/{slink}"
+    }
+
+    try:
+        sg = SendGridAPIClient(settings.SENDGRID_API_KEY)
+        response = sg.send(message)
+        if 200 <= response.status_code < 300:
+            return JsonResponse({'message': 'Email sent successfully.'})
+        else:
+            return JsonResponse({
+                'error': 'SendGrid API error',
+                'status_code': response.status_code,
+                'body': response.body.decode()
+            }, status=500)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
 
 
 
