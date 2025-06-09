@@ -47,6 +47,8 @@ urlpatterns = [
     path('notifications/', include('notify_stream.urls')),
     path('^inbox/notifications/', include(notifications.urls, namespace='notifications')),
     path('perms/', include('perms.urls')),
-    path('works/', include('works.urls')),
+    path('works/', include('wyzworks.urls')),
     path('screener/', include('screener.urls')),
+    path('ai/', include('ai.urls')),
 ]
+

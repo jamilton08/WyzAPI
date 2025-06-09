@@ -1,9 +1,10 @@
 import uuid
 from django.db import models
 from django.utils.text import slugify
-from django.db.models import JSONField
+from django.db.models import JSONField, Q
 from django.conf import settings
 from django.core.validators import MinValueValidator, MaxValueValidator
+from django.core.exceptions import ValidationError
 
 
 def generate_unique_link(folder_name):
@@ -13,8 +14,32 @@ def generate_unique_link(folder_name):
 
 
 
+class Device(models.Model):
+    """
+    A client device (identified by a UUID the client generates
+    and persists in localStorage or a cookie).
+    """
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False
+    )
+    first_seen = models.DateTimeField(auto_now_add=True)
+    last_seen  = models.DateTimeField(auto_now=True)
 
+    def __str__(self):
+        return str(self.id)
+    
 class FolderUpload(models.Model):
+    ASSIGNMENT_DEVICE = "device"
+    ASSIGNMENT_LINK   = "link"
+    ASSIGNMENT_BOTH   = "both"
+    ASSIGNMENT_CHOICES = [
+        (ASSIGNMENT_DEVICE, "Device Only"),
+        (ASSIGNMENT_LINK,   "Link Only"),
+        (ASSIGNMENT_BOTH,   "Both"),
+    ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     folder_name = models.CharField(max_length=255)
 
@@ -27,6 +52,14 @@ class FolderUpload(models.Model):
     # later you can fill this with your rubric JSON
     rubric = JSONField(null=True, blank=True)
 
+    # how students may submit this assignment
+    assignment_mode = models.CharField(
+        max_length=10,
+        choices=ASSIGNMENT_CHOICES,
+        default=ASSIGNMENT_BOTH,
+        help_text="Allow students to submit via device, link, or both"
+    )
+
     file_path = models.CharField(
         max_length=500,
         help_text="The S3 base prefix where the folder’s files are stored"
@@ -34,17 +67,18 @@ class FolderUpload(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     def save(self, *args, **kwargs):
-        # ensure both links are generated
         if not self.unique_link:
             self.unique_link = generate_unique_link(self.folder_name)
         if not self.work_link:
-            # you can pass a different seed if you like
             self.work_link = generate_unique_link(self.folder_name)
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.folder_name} (manage={self.unique_link}, work={self.work_link})"
-
+        return (
+            f"{self.folder_name} "
+            f"(manage={self.unique_link}, work={self.work_link}, "
+            f"mode={self.assignment_mode})"
+        )
 
 # Default functions for JSONField defaults
 def default_z_indices():
@@ -63,21 +97,53 @@ def default_position():
 
 class Submission(models.Model):
     """
-    Represents one student’s “snapshot” of a FolderUpload.
+    A student’s submission for one FolderUpload, identified by:
+      - device: a client-stored UUID  (mode="device")
+      - exchange_uuid: a server-generated UUID (mode="link")
     """
-    id = models.UUIDField(primary_key=True,
-                          default=uuid.uuid4,
-                          editable=False)
-    # link back to the master folder
+    MODE_DEVICE = "device"
+    MODE_LINK   = "link"
+    MODE_CHOICES = [
+        (MODE_DEVICE, "Device"),
+        (MODE_LINK,   "Link"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
     folder = models.ForeignKey(
         FolderUpload,
         on_delete=models.CASCADE,
         related_name="submissions"
     )
-    first_name = models.CharField(max_length=100)
-    last_name  = models.CharField(max_length=100)
 
-    # this lets you save a separate S3 prefix or local path
+    # 1) How this submission was created:
+    submission_mode = models.CharField(
+        max_length=10,
+        choices=(
+            (MODE_DEVICE, "Device"),
+            (MODE_LINK,   "Link"),
+        ),
+    )
+
+    # 2a) For device-mode:
+    device = models.ForeignKey(
+        Device,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="submissions",
+        help_text="Client device UUID (if mode=device)"
+    )
+
+    # 2b) For link-mode we give each submission its own exchange UUID:
+    exchange_uuid = models.UUIDField(
+        default=uuid.uuid4,
+        unique=True,
+        null=True, blank=True,
+        editable=False,
+        help_text="Server-generated link ID (if mode=link)"
+    )
+
+    # where to store this student’s files
     file_path = models.CharField(
         max_length=500,
         help_text="The S3 prefix (or other) for this submission’s files"
@@ -85,8 +151,45 @@ class Submission(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True)
 
+    class Meta:
+        # one submission per folder+device when in device mode
+        constraints = [
+            models.UniqueConstraint(
+                fields=["folder", "device"],
+                name="unique_folder_device",
+                condition=Q(submission_mode="device")
+            ),
+            # one submission per folder+exchange_uuid when in link mode
+            models.UniqueConstraint(
+                fields=["folder", "exchange_uuid"],
+                name="unique_folder_exchange",
+                condition=Q(submission_mode="Link")
+            ),
+        ]
+        ordering = ["created_at"]
+
+    def clean(self):
+        super().clean()
+        folder_mode = self.folder.assignment_mode
+
+        # First validate the normal “one or the other” logic
+        if self.submission_mode == self.MODE_DEVICE:
+            if not self.device or self.exchange_uuid:
+                raise ValidationError("Device mode requires `device` only.")
+        else:  # link mode
+            if not self.exchange_uuid or self.device:
+                raise ValidationError("Link mode requires `exchange_uuid` only.")
+
+        # Then enforce what FolderUpload allows
+        if folder_mode == FolderUpload.ASSIGNMENT_DEVICE and self.submission_mode != self.MODE_DEVICE:
+            raise ValidationError("This assignment accepts device-only submissions.")
+        if folder_mode == FolderUpload.ASSIGNMENT_LINK and self.submission_mode != self.MODE_LINK:
+            raise ValidationError("This assignment accepts link-only submissions.")
+
     def __str__(self):
-        return f"{self.first_name} {self.last_name} – {self.folder.folder_name}"
+        if self.submission_mode == self.MODE_DEVICE:
+            return f"Submission by device {self.device} for {self.folder}"
+        return f"Link submission {self.exchange_uuid} for {self.folder}"
 
 
 class Grade(models.Model):

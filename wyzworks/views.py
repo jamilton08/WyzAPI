@@ -1,10 +1,13 @@
 import os
 import json
 import logging
+
+import uuid
+
 import base64
 import boto3
 from django.conf import settings
-from .models import FolderUpload
+from .models import FolderUpload, Submission, Device
 from django.http import JsonResponse, Http404
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -64,6 +67,55 @@ def upload_nested_files(s3_client, bucket_name, s3_folder_base, structure, base_
         for child in structure.get('children', []):
             upload_nested_files(s3_client, bucket_name, s3_folder_base, child, new_base)
 
+
+import logging
+
+logger = logging.getLogger(__name__)
+
+def clone_s3_prefix(s3_client, bucket: str, source_prefix: str, dest_prefix: str):
+    """
+    Recursively copy all objects from source_prefix to dest_prefix
+    within the same bucket.
+
+    :param s3_client: a boto3 client for S3
+    :param bucket:     the S3 bucket name
+    :param source_prefix: e.g. "folder123/"
+    :param dest_prefix:   e.g. "folder123/<submission_id>/"
+    """
+    paginator = s3_client.get_paginator("list_objects_v2")
+    page_iterator = paginator.paginate(Bucket=bucket, Prefix=source_prefix)
+
+    copied = 0
+    for page in page_iterator:
+        for obj in page.get("Contents", []):
+            src_key = obj["Key"]
+            # compute the "suffix" under source_prefix
+            suffix = src_key[len(source_prefix):]
+            dest_key = f"{dest_prefix}{suffix}"
+
+            copy_source = {"Bucket": bucket, "Key": src_key}
+            try:
+                s3_client.copy_object(
+                    Bucket=bucket,
+                    CopySource=copy_source,
+                    Key=dest_key,
+                    MetadataDirective="COPY"  # preserve metadata
+                )
+                copied += 1
+            except Exception as e:
+                logger.error(
+                    f"Failed to copy {src_key} → {dest_key}: {e}",
+                    exc_info=True
+                )
+
+    if copied == 0:
+        logger.warning(f"No objects found under prefix {source_prefix}")
+    else:
+        logger.info(f"Cloned {copied} objects from {source_prefix} to {dest_prefix}")
+
+
+logger = logging.getLogger(__name__)
+
 @csrf_exempt
 def upload_folder_s3(request):
     """
@@ -71,10 +123,11 @@ def upload_folder_s3(request):
       {
         "folder_name": "...",
         "file_structure": { ... },   # your nested dict
-        "rubric": { ... }            # optional JSON rubric
+        "rubric": { ... },           # optional JSON rubric
+        "assignment_mode": "device"  # optional: "device", "link", or "both"
       }
 
-    Creates FolderUpload (with both unique_link & work_link + rubric),
+    Creates FolderUpload (with unique_link, work_link, rubric, assignment_mode),
     uploads each child into S3 under unique_link/,
     and returns both slugs.
     """
@@ -88,48 +141,67 @@ def upload_folder_s3(request):
         logger.exception("Invalid JSON payload")
         return JsonResponse({"error": "Invalid JSON"}, status=400)
 
-    folder_name    = payload.get("folder_name")
-    file_structure = payload.get("file_structure")
-    rubric         = payload.get("rubric")  # optional
+    folder_name     = payload.get("folder_name")
+    file_structure  = payload.get("file_structure")
+    rubric          = payload.get("rubric")
+    mode            = payload.get(
+        "assignment_mode",
+        FolderUpload.ASSIGNMENT_LINK
+    )
 
+    # Validate required fields
     if not folder_name or not file_structure:
         return JsonResponse(
             {"error": "Both folder_name and file_structure are required"},
             status=400
         )
 
-    # 1) Create the DB record (rubric will be NULL if not provided)
+    # Validate mode
+    valid_modes = {
+        FolderUpload.ASSIGNMENT_DEVICE,
+        FolderUpload.ASSIGNMENT_LINK,
+        FolderUpload.ASSIGNMENT_BOTH
+    }
+    if mode not in valid_modes:
+        return JsonResponse(
+            {"error": f"Invalid assignment_mode. Must be one of {valid_modes}."},
+            status=400
+        )
+
+    # 1) Create the DB record
     folder = FolderUpload.objects.create(
-        folder_name=folder_name,
-        rubric=rubric,
-        file_path=""   # placeholder; we'll fill this after upload
+        folder_name     = folder_name,
+        rubric          = rubric,
+        assignment_mode = mode,
+        file_path       = ""  # placeholder; filled after upload
     )
 
-    # now folder.unique_link and folder.work_link are both set
     manager_prefix = folder.unique_link
     logger.info(f"S3 manager prefix: {manager_prefix}")
 
     # 2) Upload nested files under s3://bucket/<manager_prefix>/...
     s3 = boto3.client(
         "s3",
-        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-        region_name=settings.AWS_S3_REGION_NAME,
+        aws_access_key_id    = settings.AWS_ACCESS_KEY_ID,
+        aws_secret_access_key= settings.AWS_SECRET_ACCESS_KEY,
+        region_name          = settings.AWS_S3_REGION_NAME,
     )
     bucket = settings.AWS_STORAGE_BUCKET_NAME
 
     for child in file_structure.get("children", []):
         upload_nested_files(s3, bucket, manager_prefix, child, "")
 
-    # 3) Update the file_path and save
+    # 3) Update file_path & save
     folder.file_path = manager_prefix
     folder.save()
 
-    # 4) Return both slugs
+    # 4) Return both slugs (and echo the mode)
     return JsonResponse({
-        "unique_link": folder.unique_link,  # manager URL slug
-        "work_link":   folder.work_link,    # student URL slug
+        "unique_link":     folder.unique_link,
+        "work_link":       folder.work_link,
+        "assignment_mode": folder.assignment_mode,
     }, status=201)
+
 
 
 def build_s3_tree(bucket, prefix, s3_client):
@@ -200,47 +272,124 @@ def build_s3_tree(bucket, prefix, s3_client):
     return children
 
 @csrf_exempt
-def retrieve_folder_from_s3(request, unique_link):
+def retrieve_or_submit_folder(request, link):
+    print(f"Received link: {link}")
     """
-    Retrieve the folder contents from S3 based on the FolderUpload record's file_path.
-    Returns a nested JSON structure preserving the folder tree with file contents.
-    For image files, the content is returned as a Base64-encoded data URL.
+    If link matches unique_link (manager mode), return folder + all its submissions.
+    If link matches work_link (student mode), then:
+      • If folder.assignment_mode allows LINK, create a new Submission in link mode:
+          - clone S3 prefix under submission.exchange_uuid
+          - return folder metadata, new exchange_uuid, new file_path, and structure
+      • Else if allows DEVICE, extract X-Device-Id header, get/create Device, create Submission:
+          - clone S3 prefix under submission.exchange_uuid (or device.id)
+          - return folder metadata, device id, file_path, and structure
     """
+    # 1) find folder and determine access type
     try:
-        folder = FolderUpload.objects.get(unique_link=unique_link)
+        folder = FolderUpload.objects.get(unique_link=link)
+        access = "manager"
     except FolderUpload.DoesNotExist:
-        raise Http404("Folder not found")
+        try:
+            folder = FolderUpload.objects.get(work_link=link)
+            access = "student"
+        except FolderUpload.DoesNotExist:
+            raise Http404("Folder not found")
 
-    s3_client = boto3.client(
-        's3',
-        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-        region_name=settings.AWS_S3_REGION_NAME,
+    # set up S3 client
+    s3 = boto3.client(
+        "s3",
+        aws_access_key_id     = settings.AWS_ACCESS_KEY_ID,
+        aws_secret_access_key = settings.AWS_SECRET_ACCESS_KEY,
+        region_name           = settings.AWS_S3_REGION_NAME,
     )
+    bucket = settings.AWS_STORAGE_BUCKET_NAME
+    original_prefix = folder.file_path.rstrip("/") + "/"
+    print(f"Original S3 prefix: {original_prefix}")
+    if access == "manager":
+        # return the tree + list of submissions
+        children = build_s3_tree(bucket, original_prefix, s3)
+        structure = {
+            "name": folder.folder_name,
+            "type": "folder",
+            "children": children,
+        }
+        submissions = []
+        for sub in folder.submissions.all():
+            submissions.append({
+                "id": str(sub.id),
+                "mode": sub.submission_mode,
+                "device": str(sub.device.id) if sub.device else None,
+                "exchange_uuid": str(sub.exchange_uuid) if sub.exchange_uuid else None,
+                "file_path": sub.file_path,
+                "created_at": sub.created_at.isoformat(),
+            })
+        return JsonResponse({
+            "folder_name": folder.folder_name,
+            "unique_link": folder.unique_link,
+            "structure": structure,
+            "submissions": submissions,
+        })
 
-    bucket_name = settings.AWS_STORAGE_BUCKET_NAME
-    # Ensure the prefix ends with a slash
-    prefix = folder.file_path.rstrip("/") + "/"
+    # STUDENT access: create or retrieve a Submission, clone S3, and return its view
+    mode = folder.assignment_mode
+    if mode in (FolderUpload.ASSIGNMENT_LINK, FolderUpload.ASSIGNMENT_BOTH):
+        # LINK-mode submission
+        sub = Submission.objects.create(
+            folder=folder,
+            submission_mode=Submission.MODE_LINK,
+            exchange_uuid=uuid.uuid4(),
+            file_path=""  # we'll set it below
+        )
+        new_prefix = f"{folder.file_path.rstrip('/')}/{sub.exchange_uuid}/"
+    elif mode in (FolderUpload.ASSIGNMENT_DEVICE, FolderUpload.ASSIGNMENT_BOTH):
+        # DEVICE-mode submission
+        device_id = request.headers.get("X-Device-Id")
+        if not device_id:
+            return JsonResponse({"error": "Missing X-Device-Id header"}, status=400)
+        device, _ = Device.objects.get_or_create(id=device_id)
+        sub = Submission.objects.create(
+            folder=folder,
+            submission_mode=Submission.MODE_DEVICE,
+            device=device,
+            file_path=""  # set below
+        )
+        new_prefix = f"{folder.file_path.rstrip('/')}/{device.id}/"
+    else:
+        return JsonResponse({
+            "error": f"Assignment not allowed via {mode} mode"
+        }, status=400)
 
+    # clone original folder tree into the submission-specific prefix
     try:
-        children = build_s3_tree(bucket_name, prefix, s3_client)
+        clone_s3_prefix(s3, bucket, original_prefix, new_prefix)
     except Exception as e:
+        logger.exception("Error cloning S3 prefix")
         return JsonResponse({"error": str(e)}, status=500)
 
-    # Wrap the children in a root node that reflects the folder record.
+    # update submission.file_path and save
+    sub.file_path = new_prefix
+    sub.save()
+
+    # build tree from the new prefix
+    children = build_s3_tree(bucket, new_prefix, s3)
     structure = {
         "name": folder.folder_name,
         "type": "folder",
         "children": children,
     }
 
-    data = {
+    # return folder metadata + submission info
+    response = {
         "folder_name": folder.folder_name,
-        "unique_link": folder.unique_link,
-        "structure": structure,
+        "file_path":   sub.file_path,
+        "structure":   structure,
     }
-    return JsonResponse(data)
+    if sub.submission_mode == Submission.MODE_LINK:
+        response["exchange_uuid"] = str(sub.exchange_uuid)
+    else:
+        response["device_id"] = str(sub.device.id)
 
+    return JsonResponse(response, status=200)
 
 # views.py
 
@@ -260,7 +409,7 @@ def convert_keys_camel_to_snake(data):
     elif isinstance(data, list):
         return [convert_keys_camel_to_snake(item) for item in data]
     return data
-
+"""
 @method_decorator(csrf_exempt, name='dispatch')
 class SaveEditorStateAPIView(APIView):
     permission_classes = [AllowAny]
@@ -383,4 +532,4 @@ class RetrieveEditorStateAPIView(APIView):
         }
         
         return Response(payload, status=status.HTTP_200_OK)
-
+"""
