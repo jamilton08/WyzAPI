@@ -72,46 +72,41 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-def clone_s3_prefix(s3_client, bucket: str, source_prefix: str, dest_prefix: str):
+def clone_s3_prefix(
+    s3_client,
+    bucket: str,
+    source_prefix: str,
+    dest_prefix: str,
+    exclude_prefixes: list[str] = None    # ← add this parameter
+):
     """
-    Recursively copy all objects from source_prefix to dest_prefix
-    within the same bucket.
+    Recursively copy all objects from source_prefix to dest_prefix,
+    skipping any keys under the given exclude_prefixes.
+    """
+    exclude_prefixes = exclude_prefixes or []  # ← ensure it’s a list
 
-    :param s3_client: a boto3 client for S3
-    :param bucket:     the S3 bucket name
-    :param source_prefix: e.g. "folder123/"
-    :param dest_prefix:   e.g. "folder123/<submission_id>/"
-    """
     paginator = s3_client.get_paginator("list_objects_v2")
-    page_iterator = paginator.paginate(Bucket=bucket, Prefix=source_prefix)
-
-    copied = 0
-    for page in page_iterator:
+    for page in paginator.paginate(Bucket=bucket, Prefix=source_prefix):
         for obj in page.get("Contents", []):
             src_key = obj["Key"]
-            # compute the "suffix" under source_prefix
-            suffix = src_key[len(source_prefix):]
-            dest_key = f"{dest_prefix}{suffix}"
 
+            # ← Skip keys that start with any excluded prefix
+            if any(src_key.startswith(exc) for exc in exclude_prefixes):
+                continue
+
+            suffix   = src_key[len(source_prefix):]
+            dest_key = f"{dest_prefix}{suffix}"
             copy_source = {"Bucket": bucket, "Key": src_key}
+
             try:
                 s3_client.copy_object(
                     Bucket=bucket,
                     CopySource=copy_source,
                     Key=dest_key,
-                    MetadataDirective="COPY"  # preserve metadata
+                    MetadataDirective="COPY"
                 )
-                copied += 1
             except Exception as e:
-                logger.error(
-                    f"Failed to copy {src_key} → {dest_key}: {e}",
-                    exc_info=True
-                )
-
-    if copied == 0:
-        logger.warning(f"No objects found under prefix {source_prefix}")
-    else:
-        logger.info(f"Cloned {copied} objects from {source_prefix} to {dest_prefix}")
+                logger.error(f"Failed to copy {src_key} → {dest_key}: {e}", exc_info=True)
 
 
 logger = logging.getLogger(__name__)
@@ -148,6 +143,14 @@ def upload_folder_s3(request):
         "assignment_mode",
         FolderUpload.ASSIGNMENT_LINK
     )
+    editor_states   = payload.get("editor_states") 
+    dragX           = payload.get("dragX")
+    dragY           = payload.get("dragY")
+    prevX           = payload.get("prevX")
+    prevY           = payload.get("prevY")
+    prevW           = payload.get("prevW")
+    prevH           = payload.get("prevH")
+
 
     # Validate required fields
     if not folder_name or not file_structure:
@@ -173,7 +176,14 @@ def upload_folder_s3(request):
         folder_name     = folder_name,
         rubric          = rubric,
         assignment_mode = mode,
-        file_path       = ""  # placeholder; filled after upload
+        file_path       = "" , # placeholder; filled after upload
+        editor_states   = editor_states,
+        drag_x          = dragX,
+        drag_y          = dragY,
+        prev_x          = prevX,
+        prev_y          = prevY,
+        prev_w          = prevW,
+        prev_h          = prevH,
     )
 
     manager_prefix = folder.unique_link
@@ -261,7 +271,7 @@ def build_s3_tree(bucket, prefix, s3_client):
     # Process subfolders (CommonPrefixes)
     for common_prefix in response.get("CommonPrefixes", []):
         sub_prefix = common_prefix["Prefix"]
-        folder_name = sub_prefix.rstrip("/").split("/")[-1]
+        folder_name = sub_prefix.rstrip("/").split("/" )[-1]
         folder_children = build_s3_tree(bucket, sub_prefix, s3_client)
         children.append({
             "name": folder_name,
@@ -271,20 +281,11 @@ def build_s3_tree(bucket, prefix, s3_client):
 
     return children
 
+# views.py
+
 @csrf_exempt
 def retrieve_or_submit_folder(request, link):
-    print(f"Received link: {link}")
-    """
-    If link matches unique_link (manager mode), return folder + all its submissions.
-    If link matches work_link (student mode), then:
-      • If folder.assignment_mode allows LINK, create a new Submission in link mode:
-          - clone S3 prefix under submission.exchange_uuid
-          - return folder metadata, new exchange_uuid, new file_path, and structure
-      • Else if allows DEVICE, extract X-Device-Id header, get/create Device, create Submission:
-          - clone S3 prefix under submission.exchange_uuid (or device.id)
-          - return folder metadata, device id, file_path, and structure
-    """
-    # 1) find folder and determine access type
+    # find folder & access mode
     try:
         folder = FolderUpload.objects.get(unique_link=link)
         access = "manager"
@@ -295,7 +296,6 @@ def retrieve_or_submit_folder(request, link):
         except FolderUpload.DoesNotExist:
             raise Http404("Folder not found")
 
-    # set up S3 client
     s3 = boto3.client(
         "s3",
         aws_access_key_id     = settings.AWS_ACCESS_KEY_ID,
@@ -304,45 +304,54 @@ def retrieve_or_submit_folder(request, link):
     )
     bucket = settings.AWS_STORAGE_BUCKET_NAME
     original_prefix = folder.file_path.rstrip("/") + "/"
-    print(f"Original S3 prefix: {original_prefix}")
+
     if access == "manager":
-        # return the tree + list of submissions
         children = build_s3_tree(bucket, original_prefix, s3)
-        structure = {
-            "name": folder.folder_name,
-            "type": "folder",
-            "children": children,
-        }
-        submissions = []
-        for sub in folder.submissions.all():
-            submissions.append({
+        structure = {"name": folder.folder_name, "type": "folder", "children": children}
+        submissions = [
+            {
                 "id": str(sub.id),
                 "mode": sub.submission_mode,
                 "device": str(sub.device.id) if sub.device else None,
                 "exchange_uuid": str(sub.exchange_uuid) if sub.exchange_uuid else None,
                 "file_path": sub.file_path,
                 "created_at": sub.created_at.isoformat(),
-            })
+            }
+            for sub in folder.submissions.all()
+        ]
         return JsonResponse({
             "folder_name": folder.folder_name,
             "unique_link": folder.unique_link,
-            "structure": structure,
+            "structure":   structure,
             "submissions": submissions,
+            "editor_states": folder.editor_states,
+            "dragX": folder.drag_x,
+            "dragY": folder.drag_y,
+            "prevX": folder.prev_x,
+            "prevY": folder.prev_y,
+            "prevW": folder.prev_w,
+            "prevH": folder.prev_h,  
         })
 
-    # STUDENT access: create or retrieve a Submission, clone S3, and return its view
+    # build exclude list of prior submission prefixes
+    existing_prefixes = []
+    for sub in folder.submissions.all():
+        if sub.submission_mode == Submission.MODE_LINK and sub.exchange_uuid:
+            existing_prefixes.append(f"{original_prefix}{sub.exchange_uuid}/")
+        elif sub.submission_mode == Submission.MODE_DEVICE and sub.device:
+            existing_prefixes.append(f"{original_prefix}{sub.device.id}/")
+
+    # student access: create submission
     mode = folder.assignment_mode
     if mode in (FolderUpload.ASSIGNMENT_LINK, FolderUpload.ASSIGNMENT_BOTH):
-        # LINK-mode submission
         sub = Submission.objects.create(
             folder=folder,
             submission_mode=Submission.MODE_LINK,
             exchange_uuid=uuid.uuid4(),
-            file_path=""  # we'll set it below
+            file_path=""
         )
-        new_prefix = f"{folder.file_path.rstrip('/')}/{sub.exchange_uuid}/"
+        new_prefix = f"{original_prefix}{sub.exchange_uuid}/"
     elif mode in (FolderUpload.ASSIGNMENT_DEVICE, FolderUpload.ASSIGNMENT_BOTH):
-        # DEVICE-mode submission
         device_id = request.headers.get("X-Device-Id")
         if not device_id:
             return JsonResponse({"error": "Missing X-Device-Id header"}, status=400)
@@ -351,38 +360,42 @@ def retrieve_or_submit_folder(request, link):
             folder=folder,
             submission_mode=Submission.MODE_DEVICE,
             device=device,
-            file_path=""  # set below
+            file_path=""
         )
-        new_prefix = f"{folder.file_path.rstrip('/')}/{device.id}/"
+        new_prefix = f"{original_prefix}{device.id}/"
     else:
-        return JsonResponse({
-            "error": f"Assignment not allowed via {mode} mode"
-        }, status=400)
+        return JsonResponse({"error": f"Assignment not allowed via {mode} mode"}, status=400)
 
-    # clone original folder tree into the submission-specific prefix
+    # clone only original files, skipping previous sub-folders
     try:
-        clone_s3_prefix(s3, bucket, original_prefix, new_prefix)
+        clone_s3_prefix(
+            s3_client       = s3,
+            bucket          = bucket,
+            source_prefix   = original_prefix,
+            dest_prefix     = new_prefix,
+            exclude_prefixes= existing_prefixes
+        )
     except Exception as e:
         logger.exception("Error cloning S3 prefix")
         return JsonResponse({"error": str(e)}, status=500)
 
-    # update submission.file_path and save
     sub.file_path = new_prefix
     sub.save()
 
-    # build tree from the new prefix
     children = build_s3_tree(bucket, new_prefix, s3)
-    structure = {
-        "name": folder.folder_name,
-        "type": "folder",
-        "children": children,
-    }
+    structure = {"name": folder.folder_name, "type": "folder", "children": children}
 
-    # return folder metadata + submission info
     response = {
         "folder_name": folder.folder_name,
         "file_path":   sub.file_path,
         "structure":   structure,
+        "editor_states": folder.editor_states,
+        "dragX": folder.drag_x,
+        "dragY": folder.drag_y,
+        "prevX": folder.prev_x,
+        "prevY": folder.prev_y,
+        "prevW": folder.prev_w,
+        "prevH": folder.prev_h,   
     }
     if sub.submission_mode == Submission.MODE_LINK:
         response["exchange_uuid"] = str(sub.exchange_uuid)
@@ -390,6 +403,7 @@ def retrieve_or_submit_folder(request, link):
         response["device_id"] = str(sub.device.id)
 
     return JsonResponse(response, status=200)
+
 
 # views.py
 
@@ -409,6 +423,58 @@ def convert_keys_camel_to_snake(data):
     elif isinstance(data, list):
         return [convert_keys_camel_to_snake(item) for item in data]
     return data
+
+
+@csrf_exempt
+def update_submission_name(request, exchange_uuid):
+    """
+    POST JSON:
+      {
+        "first_name": "...",
+        "last_name": "..."
+      }
+    Finds the Submission with that exchange_uuid, updates the names,
+    and returns the updated submission data.
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "Only POST allowed"}, status=405)
+
+    try:
+        payload = json.loads(request.body)
+    except json.JSONDecodeError:
+        logger.exception("Invalid JSON in update_submission_name")
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+    first_name = payload.get("first_name", "").strip()
+    last_name  = payload.get("last_name", "").strip()
+    if not first_name or not last_name:
+        return JsonResponse(
+            {"error": "Both first_name and last_name are required."},
+            status=400
+        )
+
+    try:
+        sub = Submission.objects.get(exchange_uuid=exchange_uuid)
+    except Submission.DoesNotExist:
+        raise Http404("Submission not found")
+
+    sub.first_name = first_name
+    sub.last_name  = last_name
+    # optional: run full_clean() to re-validate
+    try:
+        sub.full_clean()
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=400)
+
+    sub.save()
+
+    return JsonResponse({
+        "submission_id": str(sub.id),
+        "exchange_uuid": str(sub.exchange_uuid),
+        "first_name":    sub.first_name,
+        "last_name":     sub.last_name,
+        "file_path":     sub.file_path,
+    })
 """
 @method_decorator(csrf_exempt, name='dispatch')
 class SaveEditorStateAPIView(APIView):

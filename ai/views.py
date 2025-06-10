@@ -14,22 +14,22 @@ from .generators import generate_single_dsl, generate_question_batch, generate_r
 
 
 # 1) locate & load model
-HERE      = Path(__file__).resolve().parent
-MODEL_DIR = HERE / "shapes_model"
-if not MODEL_DIR.exists():
-    raise RuntimeError(f"Model folder not found at {MODEL_DIR}")
+#HERE      = Path(__file__).resolve().parent
+#MODEL_DIR = HERE / "shapes_model"
+#if not MODEL_DIR.exists():
+#    raise RuntimeError(f"Model folder not found at {MODEL_DIR}")
 
-TORCH_DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-HF_DEVICE    = 0 if torch.cuda.is_available() else -1
+#TORCH_DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#HF_DEVICE    = 0 if torch.cuda.is_available() else -1
 
-tokenizer = AutoTokenizer.from_pretrained(str(MODEL_DIR))
-model     = AutoModelForSeq2SeqLM.from_pretrained(str(MODEL_DIR)).to(TORCH_DEVICE)
-generator = pipeline(
-    "text2text-generation",
-    model=model,
-    tokenizer=tokenizer,
-    device=TORCH_DEVICE
-)
+#tokenizer = AutoTokenizer.from_pretrained(str(MODEL_DIR))
+#model     = AutoModelForSeq2SeqLM.from_pretrained(str(MODEL_DIR)).to(TORCH_DEVICE)
+#generator = pipeline(
+#    "text2text-generation",
+#    model=model,
+#    tokenizer=tokenizer,
+#    device=TORCH_DEVICE
+#)
 
 
 

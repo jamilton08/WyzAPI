@@ -12,7 +12,9 @@ def generate_unique_link(folder_name):
     unique_suffix = uuid.uuid4().hex  # 32 characters
     return f"{base_slug}-{unique_suffix}"
 
-
+def default_editor_states():
+    # return whatever initial shape you need; e.g. empty list or dict
+    return {}
 
 class Device(models.Model):
     """
@@ -66,6 +68,19 @@ class FolderUpload(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
+    editor_states = JSONField(
+        default=default_editor_states,
+        blank=True,
+        help_text="Stores the current state of all code editors as JSON"
+    )
+
+    drag_x = models.FloatField(null=True, blank=True)
+    drag_y = models.FloatField(null=True, blank=True)
+    prev_x = models.FloatField(null=True, blank=True)
+    prev_y = models.FloatField(null=True, blank=True)
+    prev_w = models.FloatField(null=True, blank=True)
+    prev_h = models.FloatField(null=True, blank=True)
+
     def save(self, *args, **kwargs):
         if not self.unique_link:
             self.unique_link = generate_unique_link(self.folder_name)
@@ -115,6 +130,10 @@ class Submission(models.Model):
         on_delete=models.CASCADE,
         related_name="submissions"
     )
+
+    first_name = models.CharField(max_length=100, blank=True, null=True)
+    last_name  = models.CharField(max_length=100, blank=True, null=True)
+
 
     # 1) How this submission was created:
     submission_mode = models.CharField(
