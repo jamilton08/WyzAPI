@@ -8,8 +8,8 @@ from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
 import torch
 from django.views.decorators.http import require_POST
 import random
-from .models import PromptDSL, GeneratedQuestion, RubricRequest
-from .generators import generate_single_dsl, generate_question_batch, generate_rubric_batch
+from .models import PromptDSL, GeneratedQuestion, RubricRequest, AssignmentRequest, LessonPlanRequest
+from .generators import generate_single_dsl, generate_question_batch, generate_rubric_batch, generate_grade_from_files, generate_assignment_batch, generate_lessonplan_batch
 
 
 
@@ -56,7 +56,7 @@ def prompt_to_dsl(request):
 
     # generate
     try:
-        output =     out = generator(prompt, max_length=64, num_beams=4, early_stopping=True)
+        output = generate_single_dsl(prompt, max_length=64, num_beams=4, early_stopping=True)
     except Exception as e:
         return JsonResponse(
             {"prompt": prompt, "error_detail": str(e)},
@@ -249,7 +249,6 @@ def generate_rubric(request):
         rubric_obj.save()
 
         # 4) Return the list of {part, weight} dicts as JSON
-        print("Generated rubric:", rubric_list)
         return JsonResponse(rubric_list, safe=False)
 
     except Exception as e:
@@ -262,6 +261,162 @@ def generate_rubric(request):
             {"error": "Could not generate rubric", "details": str(e)},
             status=500
         )
+    
+
+@csrf_exempt
+def generate_assignment(request):
+    """
+    View at /api/assignment/ that:
+     • Accepts POST JSON {"text": "..."}
+     • Calls generate_assignment_batch(text)
+     • Saves prompt + resulting JSON into AssignmentRequest
+     • Returns the fileStructure array to the client
+    """
+    if request.method != "POST":
+        return HttpResponseBadRequest("Only POST allowed.")
+    try:
+        payload = json.loads(request.body.decode("utf-8"))
+        user_text = payload.get("text", "").strip()
+        if not user_text:
+            return HttpResponseBadRequest("Missing 'text' in request body.")
+    except Exception:
+        return HttpResponseBadRequest("Invalid JSON payload.")
+
+    assign_obj = AssignmentRequest.objects.create(prompt_text=user_text)
+    try:
+        file_structure = generate_assignment_batch(user_text)
+        assign_obj.generated_assignment = file_structure
+        assign_obj.save()
+        print(file_structure)
+        return JsonResponse(file_structure, safe=False)
+    except Exception as e:
+        print(e)
+        assign_obj.generated_assignment = {"error": str(e)}
+        assign_obj.save()
+        return JsonResponse(
+            {"error": "Could not generate assignment", "details": str(e)},
+            status=500
+        )
+
+@csrf_exempt
+def generate_lessonplan(request):
+    """
+    View at /api/lessonplan/ that:
+     • Accepts POST JSON {"text": "..."}
+     • Calls generate_lessonplan_batch(text)
+     • Saves prompt + resulting JSON into LessonPlanRequest
+     • Returns the lessonPlan object to the client
+    """
+    if request.method != "POST":
+        return HttpResponseBadRequest("Only POST allowed.")
+    try:
+        payload = json.loads(request.body.decode("utf-8"))
+        user_text = payload.get("text", "").strip()
+        print("step 1: user_text =", user_text)
+        if not user_text:
+            return HttpResponseBadRequest("Missing 'text' in request body.")
+    except Exception:
+        return HttpResponseBadRequest("Invalid JSON payload.")
+
+    lesson_obj = LessonPlanRequest.objects.create(prompt_text=user_text)
+    try:
+        print("step 2: calling generate_lessonplan_batch")
+        lesson_plan = generate_lessonplan_batch(user_text)
+        lesson_obj.generated_lessonplan = lesson_plan
+        lesson_obj.save()
+        print(lesson_plan)
+        return JsonResponse(lesson_plan, safe=True)
+    except Exception as e:
+        print(e)
+        lesson_obj.generated_plan = {"error": str(e)}
+        lesson_obj.save()
+        return JsonResponse(
+            {"error": "Could not generate lesson plan", "details": str(e)},
+            status=500
+        )
+    
+
+@csrf_exempt
+def grade_files_view(request):
+    # CORS preflight
+    if request.method == "OPTIONS":
+        resp = HttpResponse()
+        resp["Access-Control-Allow-Origin"]  = "*"
+        resp["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        resp["Access-Control-Allow-Headers"] = "Content-Type"
+        return resp
+
+    if request.method != "POST":
+        return HttpResponseBadRequest("Only POST allowed.")
+
+    # Parse incoming JSON
+    try:
+        payload = json.loads(request.body)
+        file_structure = payload["fileStructure"]
+    except (json.JSONDecodeError, KeyError):
+        return HttpResponseBadRequest('JSON must be {"fileStructure": …}')
+
+    # Build the prompt
+    prompt = build_grade_prompt(file_structure)
+
+    # Call OpenAI
+    try:
+        openai.api_key = os.getenv("OPENAI_API_KEY")
+        resp = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that grades student submissions."},
+                {"role": "user",   "content": prompt}
+            ],
+            temperature=0.0,
+        )
+        assistant_output = resp.choices[0].message.content.strip()
+        result = json.loads(assistant_output)
+    except Exception as e:
+        return JsonResponse(
+            {"error": "Grading failed", "details": str(e)},
+            status=500,
+            headers={"Access-Control-Allow-Origin": "*"}
+        )
+
+    return JsonResponse(result, status=200, headers={"Access-Control-Allow-Origin": "*"})
 
 
 
+
+@csrf_exempt
+def grade_files_view(request):
+    # CORS preflight
+    if request.method == "OPTIONS":
+        resp = HttpResponse()
+        resp["Access-Control-Allow-Origin"]  = "*"
+        resp["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        resp["Access-Control-Allow-Headers"] = "Content-Type"
+        return resp
+
+    if request.method != "POST":
+        return HttpResponseBadRequest("Only POST allowed.")
+
+    # parse & validate
+    try:
+        payload = json.loads(request.body)
+        file_structure = payload["fileStructure"]
+    except (json.JSONDecodeError, KeyError):
+        return HttpResponseBadRequest('JSON must be {"fileStructure": …}')
+
+    # generate grade + suggestions
+    try:
+        result = generate_grade_from_files(file_structure)
+    except Exception as e:
+        return JsonResponse(
+            {"error": "Grading failed", "details": str(e)},
+            status=500,
+            headers={"Access-Control-Allow-Origin": "*"}
+        )
+
+    # return { score: int, suggestions: [ {text, points}, … ] }
+    return JsonResponse(
+        result,
+        status=200,
+        headers={"Access-Control-Allow-Origin": "*"}
+    )

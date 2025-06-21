@@ -68,3 +68,19 @@ class RubricRequest(models.Model):
 
     def __str__(self):
         return f"RubricRequest #{self.id} @ {self.created_at:%Y-%m-%d %H:%M}"
+
+class AssignmentRequest(models.Model):
+    prompt_text = models.TextField()
+    generated_assignment = models.JSONField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"AssignmentRequest #{self.pk}"
+
+class LessonPlanRequest(models.Model):
+    prompt_text = models.TextField()
+    generated_lessonplan = models.JSONField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"LessonPlanRequest #{self.pk}"
