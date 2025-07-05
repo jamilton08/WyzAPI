@@ -7,4 +7,5 @@ urlpatterns = [
     path('generate/assignment/', views.generate_assignment, name='generate_assignment'),
     path('generate/lessonplan/', views.generate_lessonplan, name='generate_lessonplan'),
     path('grade/files/', views.grade_files_view, name='grade_files'),
+    path('generate/form/content/', views.generate_form_content, name='generate_form_content'),
 ]

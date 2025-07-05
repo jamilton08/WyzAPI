@@ -7,7 +7,7 @@ import uuid
 import base64
 import boto3
 from django.conf import settings
-from .models import FolderUpload, Submission, Device
+from .models import FolderUpload, Submission, Device, Form, CompletedField, FormFile
 from django.http import JsonResponse, Http404
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -15,8 +15,9 @@ from rest_framework import status
 from rest_framework.permissions import AllowAny
 import re
 from django.views.decorators.csrf import csrf_exempt
-from django.utils.decorators import method_decorator
-
+from rest_framework.decorators import api_view, permission_classes
+from .serializers import FormInitSerializer, FormDetailSerializer, FormFileSerializer, CompletedFieldSerializer, CompletedModulatedFieldSerializer, FormLinkerSerializer
+from django.shortcuts import get_object_or_404
 
 logger = logging.getLogger(__name__)
 
@@ -475,6 +476,118 @@ def update_submission_name(request, exchange_uuid):
         "last_name":     sub.last_name,
         "file_path":     sub.file_path,
     })
+
+def get_form_by_token(token, manage=False):
+    lookup = {"manage_token": token} if manage else {"access_token": token}
+    return Form.objects.filter(**lookup).first()
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def init_form(request):
+    print(request.data)
+    file_id = request.data.get("imported_form_id", None)
+    print(f"Initializing form with file_id: {file_id}")
+    """
+    Called as soon as the user opens the form-builder.
+    Always returns (id, manage_token, access_token).
+    """
+    form = Form.objects.create()
+    if file_id:
+        FormFile.objects.create(form=form, file_id=str(file_id))
+    return Response(FormInitSerializer(form).data, status=status.HTTP_201_CREATED)
+
+
+@csrf_exempt
+@permission_classes([AllowAny])
+@api_view(["GET"])
+def view_form(request):
+    """
+    Read‐only view, accepts either manage_token or access_token
+    via “X-Form-Token” header.
+    """
+    token = request.headers.get("X-Form-Token")
+    form = Form.objects.filter(
+      models.Q(manage_token=token) | models.Q(access_token=token)
+    ).first()
+    if not form:
+        return Response({"detail":"Invalid token"}, status=401)
+    return Response(FormDetailSerializer(form).data)
+
+
+@csrf_exempt
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def form_content(request):
+    """
+    POST { "formId": "<file_id from frontend>" }
+    Returns all CompletedFields for the linked Form.
+    """
+    file_id = request.data.get("formId")
+    print(f"Fetching form content for file_id: {file_id}")
+    if not file_id:
+        return Response(
+            {"detail": "Missing formId in request body"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        ff = FormFile.objects.get(file_id=file_id)
+    except FormFile.DoesNotExist:
+        return Response(
+            {"detail": f"No FormFile found for id={file_id}"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    completed_qs = ff.form.completed_fields.all()
+    serializer = FormFileSerializer(completed_qs, many=True)
+    print(serializer.data)
+    return Response({"completedFields": serializer.data})
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def manage_form(request, token):
+    """
+    GET /works/forms/manage/<token>/
+    Returns the form’s metadata plus all completed fields.
+    """
+    form = get_object_or_404(Form, manage_token=token)
+    completed_qs = form.completed_fields.all().order_by('order')
+    completed_ser = CompletedModulatedFieldSerializer(completed_qs, many=True)
+    print(completed_ser.data)
+    return Response({
+        "formId":    str(form.id),
+        "topic":     form.topic,
+        "description": form.description,
+        "completedFields": completed_ser.data,
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def link_form_file(request):
+    print("like we made it bro")
+    """
+    POST { "managing_link": "<manage_token>", "file_id": "<uuid-or-other>" }
+    ➔ Looks up the Form by manage_token, creates a FormFile, and returns it.
+    """
+    managing_link = request.data.get('managing_link')
+    file_id       = request.data.get('file_id')
+    print("like we made it bro ", managing_link)
+    if not managing_link or not file_id:
+        return Response(
+            { "detail": "must provide both managing_link and file_id" },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    form = get_object_or_404(Form, manage_token=managing_link)
+
+    # Enforce the unique_together at the DB‐level; if it already exists, return 200
+    obj, created = FormFile.objects.get_or_create(form=form, file_id=str(file_id))
+
+    serializer = FormLinkerSerializer(obj)
+    return Response(serializer.data, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
 """
 @method_decorator(csrf_exempt, name='dispatch')
 class SaveEditorStateAPIView(APIView):

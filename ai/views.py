@@ -9,8 +9,8 @@ import torch
 from django.views.decorators.http import require_POST
 import random
 from .models import PromptDSL, GeneratedQuestion, RubricRequest, AssignmentRequest, LessonPlanRequest
-from .generators import generate_single_dsl, generate_question_batch, generate_rubric_batch, generate_grade_from_files, generate_assignment_batch, generate_lessonplan_batch
-
+from .generators import generate_single_dsl, generate_question_batch, generate_rubric_batch, generate_grade_from_files, generate_assignment_batch, generate_lessonplan_batch, generate_form_from_schema
+from wyzworks.models import Form, CompletedField
 
 
 # 1) locate & load model
@@ -420,3 +420,151 @@ def grade_files_view(request):
         status=200,
         headers={"Access-Control-Allow-Origin": "*"}
     )
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
+from rest_framework import status
+from wyzworks.models import Form, CompletedField
+from .serializers import  FormDetailSerializer
+
+
+
+def get_form_by_token(token, manage=False):
+    lookup = {"manage_token": token} if manage else {"access_token": token}
+    return Form.objects.filter(**lookup).first()
+
+from django.db import transaction
+from rest_framework.parsers import JSONParser
+from rest_framework.decorators import (
+    api_view,
+    authentication_classes,
+    permission_classes,
+    parser_classes,
+)
+from rest_framework.permissions import AllowAny
+
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+@transaction.atomic
+def generate_form_content(request):
+    """
+    Expects JSON body:
+      {
+        "manage_token": "...",
+        "topic": "...",
+        "description": "...",
+        "schema": [
+          {
+            "uid": "...",
+            "id": "...",             # stored as field_type
+            "validation": {...},
+            "defaultProps": {...},
+            # question/answer may be empty
+            "question": "...",
+            "answer": "...",
+          },
+          …
+        ]
+      }
+
+    Returns the updated FormDetailSerializer output.
+    """
+    token = request.data.get("manage_token")
+    if not token:
+        return Response({"detail": "Missing manage_token"}, status=status.HTTP_400_BAD_REQUEST)
+
+    # 1) Lock & fetch the form
+    try:
+        form = get_form_by_token(token, manage=True)
+    except Form.DoesNotExist:
+        return Response({"detail": "Invalid manage token"}, status=status.HTTP_401_UNAUTHORIZED)
+
+    # 2) Pull payload
+    topic       = request.data.get("title", "")
+    description = request.data.get("description", "")
+    schema      = request.data.get("schema", [])
+
+    # 3) Call your GPT helper
+    try:
+        ai_resp = generate_form_from_schema(topic, description, schema)
+    except Exception as e:
+        return Response(
+            {"detail": "AI generation failed", "error": str(e)},
+            status=status.HTTP_502_BAD_GATEWAY
+        )
+    completed = ai_resp.get("completedFields", [])
+
+    # 4) Update the Form itself
+    form.topic       = topic
+    form.description = description
+    form.save(update_fields=["topic", "description"])
+
+    # 5) Sync CompletedField rows
+    existing = { cf.order: cf for cf in form.completed_fields.all() }
+    to_update, to_create = [], []
+    seen_orders = set()
+
+    for idx, field in enumerate(schema):
+        seen_orders.add(idx)
+
+        # ALWAYS take meta‐fields from YOUR schema
+        uid         = field["uid"]
+        field_type  = field["id"]
+        validation  = field.get("validation", {})
+        orig_props  = field.get("defaultProps", {})
+        gradable    = field.get("gradable", False)    # ← NEW
+        points      = field.get("points", 0)         # ← NEW
+
+        # ALIGN AI result by index
+        ai_entry    = completed[idx] if idx < len(completed) else {}
+        q_text      = ai_entry.get("question", field.get("question", ""))
+        a_text      = ai_entry.get("answer",   field.get("answer",   ""))
+        dp_override = ai_entry.get("defaultProps", orig_props)
+
+        if idx in existing:
+            obj = existing[idx]
+            obj.question      = q_text
+            obj.answer        = a_text
+            obj.default_props = dp_override
+            obj.validation    = validation
+            obj.field_type    = field_type
+            obj.gradable      = gradable   # ← NEW
+            obj.points        = points     # ← NEW
+            # leave obj.uid, obj.field_type, obj.validation untouched
+            to_update.append(obj)
+        else:
+            to_create.append(
+                CompletedField(
+                    form          = form,
+                    order         = idx,
+                    uid           = uid,
+                    field_type    = field_type,
+                    validation    = validation,
+                    default_props = dp_override,
+                    question      = q_text,
+                    answer        = a_text,
+                    gradable      = gradable,    # ← NEW
+                    points        = points,      # ← NEW
+                )
+            )
+
+    # remove any old rows not in the new index set
+    to_delete_pks = [
+        obj.pk for order, obj in existing.items()
+        if order not in seen_orders
+    ]
+
+    if to_update:
+        CompletedField.objects.bulk_update(
+            to_update,
+            ["question", "answer", "default_props", "validation", "field_type", "gradable", "points"]
+        )
+    if to_create:
+        CompletedField.objects.bulk_create(to_create)
+    if to_delete_pks:
+        CompletedField.objects.filter(pk__in=to_delete_pks).delete()
+
+    print(FormDetailSerializer(form).data)
+    # 6) Return full form detail
+    return Response(FormDetailSerializer(form).data, status=status.HTTP_201_CREATED)

@@ -4,7 +4,7 @@ from django.utils.text import slugify
 from django.db.models import JSONField
 from django.conf import settings
 from django.core.validators import MinValueValidator, MaxValueValidator
-
+import secrets
 
 def generate_unique_link(folder_name):
     base_slug = slugify(folder_name)
@@ -179,3 +179,28 @@ class CodeEntry(models.Model):
 
     def __str__(self):
         return f"Entry {self.editor_id} for {self.submission}"
+    
+
+class Form(models.Model):
+    topic           = models.CharField(max_length=255, blank=True)
+    description     = models.TextField(blank=True)
+    created_at      = models.DateTimeField(auto_now_add=True)
+    manage_token    = models.CharField(max_length=64, unique=True, editable=False)
+    access_token    = models.CharField(max_length=64, unique=True, editable=False)
+
+    def save(self, *args, **kwargs):
+        if not self.manage_token:
+            # 32 bytes → ~43 chars of URL-safe text
+            self.manage_token = secrets.token_urlsafe(32)
+        if not self.access_token:
+            self.access_token = secrets.token_urlsafe(32)
+        super().save(*args, **kwargs)
+
+class CompletedField(models.Model):
+    form = models.ForeignKey(Form, related_name="completed_fields", on_delete=models.CASCADE)
+    question = models.TextField()
+    answer = models.TextField()
+    order = models.PositiveIntegerField()
+
+    class Meta:
+        ordering = ("order",)

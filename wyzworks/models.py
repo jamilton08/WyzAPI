@@ -5,6 +5,8 @@ from django.db.models import JSONField, Q
 from django.conf import settings
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.core.exceptions import ValidationError
+import secrets
+
 
 
 def generate_unique_link(folder_name):
@@ -301,3 +303,49 @@ class CodeEntry(models.Model):
 
     def __str__(self):
         return f"Entry {self.editor_id} for {self.submission}"
+    
+class Form(models.Model):
+    topic           = models.CharField(max_length=255, blank=True)
+    description     = models.TextField(blank=True)
+    created_at      = models.DateTimeField(auto_now_add=True)
+    manage_token    = models.CharField(max_length=64, unique=True, editable=False)
+    access_token    = models.CharField(max_length=64, unique=True, editable=False)
+
+    def save(self, *args, **kwargs):
+        if not self.manage_token:
+            # 32 bytes → ~43 chars of URL-safe text
+            self.manage_token = secrets.token_urlsafe(32)
+        if not self.access_token:
+            self.access_token = secrets.token_urlsafe(32)
+        super().save(*args, **kwargs)
+
+
+class FormFile(models.Model):
+    form      = models.ForeignKey(Form, related_name="files", on_delete=models.CASCADE)
+    file_id   = models.CharField(max_length=255, help_text="UUID or other identifier from the frontend")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("form", "file_id")
+
+class CompletedField(models.Model):
+    form = models.ForeignKey(Form, related_name="completed_fields", on_delete=models.CASCADE)
+    uid = models.CharField(max_length=255)
+    # “id” is a Python builtin, so let's call this field_type
+    field_type = models.CharField(max_length=100)
+
+    # store the incoming defaultProps JSON here
+    default_props = models.JSONField(default=dict, blank=True)
+    # store the incoming validation JSON here
+    validation   = models.JSONField(default=dict, blank=True)
+    question = models.TextField()
+    answer = models.TextField()
+    order = models.PositiveIntegerField()
+
+
+    # ─── New grading fields ────────────────────────
+    gradable = models.BooleanField(default=False)
+    points   = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ("order",)

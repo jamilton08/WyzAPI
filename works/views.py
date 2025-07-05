@@ -7,12 +7,17 @@ from django.conf import settings
 from .models import FolderUpload
 from django.http import JsonResponse, Http404
 from rest_framework.views import APIView
+
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 import re
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
+from .models import Form, CompletedField
+from .serializers import FormInitSerializer, FormDetailSerializer
+from rest_framework.decorators import api_view, permission_classes
+
 
 
 logger = logging.getLogger(__name__)
@@ -383,4 +388,35 @@ class RetrieveEditorStateAPIView(APIView):
         }
         
         return Response(payload, status=status.HTTP_200_OK)
+    
 
+
+def get_form_by_token(token, manage=False):
+    lookup = {"manage_token": token} if manage else {"access_token": token}
+    return Form.objects.filter(**lookup).first()
+
+@csrf_exempt
+@api_view(["POST"])
+def init_form(request):
+    """
+    Called as soon as the user opens the form-builder.
+    Always returns (id, manage_token, access_token).
+    """
+    form = Form.objects.create()
+    return Response(FormInitSerializer(form).data, status=status.HTTP_201_CREATED)
+
+
+@csrf_exempt
+@api_view(["GET"])
+def view_form(request):
+    """
+    Read‐only view, accepts either manage_token or access_token
+    via “X-Form-Token” header.
+    """
+    token = request.headers.get("X-Form-Token")
+    form = Form.objects.filter(
+      models.Q(manage_token=token) | models.Q(access_token=token)
+    ).first()
+    if not form:
+        return Response({"detail":"Invalid token"}, status=401)
+    return Response(FormDetailSerializer(form).data)

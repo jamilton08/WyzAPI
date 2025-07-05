@@ -436,3 +436,75 @@ def generate_grade_from_files(file_structure: dict) -> dict:
 
     # 4) parse and return
     return json.loads(raw)
+
+
+# 1) All your instructions live here
+SYSTEM_INSTRUCTIONS = """
+You are a form‐generation assistant.  Your job:
+
+• You will be given a JSON payload with:
+    - topic: a string
+    - description: a string
+    - fields: an array of objects, each with:
+        • uid       
+        • id         (component type)
+        • label      
+        • defaultProps (may adapt placeholders or props to match generated question)
+        • question   (might be empty; if empty, generate one)
+        • answer     (always generate an answer for the question asked according to the type)
+        • validation 
+
+• You must preserve any non‐empty question or answer.
+• If question or answer is empty, you must fill it in, using topic, description, label, and type.
+• tweak defaultProps accordingly  (e.g. change placeholder text, options must be four or higher, values must be four or higher, items must be five or higher) so the UI fits the question/answer.
+• Do NOT add extra fields.
+• Answer must be filled.
+
+When you reply, return exactly one JSON object (no extra text or markdown fences) in this format:
+
+{
+  "completedFields": [
+    {
+      "defaultProps": { … },
+      "question": "...",
+      "answer": "..."
+    },
+  ]
+}
+"""
+
+def build_form_payload(topic: str, description: str, fields: list) -> str:
+    """
+    Serialize just the raw payload.  All the “what to do” lives in SYSTEM_INSTRUCTIONS.
+    """
+    payload = {
+        "topic": topic,
+        "description": description,
+        "fields": fields,
+    }
+    # single‐line JSON to save on tokens
+    return json.dumps(payload, separators=(",", ":"))
+
+@backoff.on_exception(backoff.expo, (RateLimitError, APIError), max_time=300)
+def generate_form_from_schema(topic: str, description: str, fields: list) -> dict:
+    """
+    Ask OpenAI to complete/clean up the form schema.
+    """
+    user_content = build_form_payload(topic, description, fields)
+
+    resp = openai.chat.completions.create(
+        model="gpt-4-turbo-preview",
+        messages=[
+            {"role": "system", "content": SYSTEM_INSTRUCTIONS},
+            {"role": "user",   "content": user_content}
+        ],
+        temperature=0.7,
+    )
+
+    raw = resp.choices[0].message.content.strip()
+    # strip any ```json…``` fences if present
+    m = re.match(r"^```(?:json)?\s*([\s\S]+?)\s*```$", raw)
+    if m:
+        raw = m.group(1).strip()
+
+    return json.loads(raw)
